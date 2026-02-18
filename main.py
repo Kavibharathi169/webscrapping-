@@ -1,54 +1,119 @@
 import requests
 from bs4 import BeautifulSoup
-import os
-
-URL = input("Enter the website URL: ").strip()
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
-
-OUTPUT_DIR = "output"
-OUTPUT_FILE = "full_website_text.txt"
+from datetime import datetime
+import hashlib
+from pathlib import Path
 
 
-def extract_all_text(url: str) -> list[str]:
-    response = requests.get(url, headers=HEADERS, timeout=15)
-    response.raise_for_status()
+class GovernanceContentExtractor:
+    def __init__(self, timeout: int = 20):
+        self.timeout = timeout
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Governance-Ingestion/1.0)"
+        }
 
-    soup = BeautifulSoup(response.text, "lxml")
+    def fetch_page(self, url: str) -> BeautifulSoup:
+        response = requests.get(url, headers=self.headers, timeout=self.timeout)
+        response.raise_for_status()
+        return BeautifulSoup(response.text, "html.parser")
 
-    # ❌ Remove non-visible elements
-    for tag in soup(["script", "style", "noscript", "svg"]):
-        tag.decompose()
+    def generate_chunk_id(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
-    # ✅ Extract ALL visible text
-    text_lines = []
+    def extract(self, url: str) -> list[dict]:
+        soup = self.fetch_page(url)
 
-    for string in soup.stripped_strings:
-        text_lines.append(string)
+        # Remove non-content noise
+        for tag in soup(["script", "style", "noscript", "iframe"]):
+            tag.decompose()
 
-    return text_lines
+        document_title = soup.title.get_text(strip=True) if soup.title else "Unknown"
+        extracted_at = datetime.utcnow().isoformat()
+
+        chunks = []
+
+        # Context trackers
+        current_section = None
+        current_section_level = None
+        current_chapter = None
+        current_article = None
+
+        allowed_tags = [
+            "h1", "h2", "h3", "h4",
+            "p", "li", "div", "span", "td", "dd"
+        ]
+
+        for element in soup.find_all(allowed_tags):
+            text = element.get_text(" ", strip=True)
+
+            if not text or len(text) < 20:
+                continue
+
+            # Update hierarchy
+            if element.name in {"h1", "h2", "h3", "h4"}:
+                current_section = text
+                current_section_level = element.name
+
+                if text.lower().startswith("chapter"):
+                    current_chapter = text
+                if text.lower().startswith("article"):
+                    current_article = text
+
+            chunk = {
+                "source_url": url,
+                "document_title": document_title,
+                "organization": "Halows Co., Ltd.",
+                "document_type": "governance_policy",
+                "section_title": current_section,
+                "section_level": current_section_level,
+                "chapter": current_chapter,
+                "article": current_article,
+                "content_type": element.name,
+                "text": text,
+                "char_count": len(text),
+                "chunk_id": self.generate_chunk_id(text),
+                "extracted_at": extracted_at
+            }
+
+            chunks.append(chunk)
+
+        return chunks
 
 
-def save_to_txt(lines: list[str], filepath: str):
-    with open(filepath, "w", encoding="utf-8") as f:
-        for line in lines:
-            f.write(line + "\n")
+def save_to_text_file(chunks: list[dict], output_dir="output"):
+    Path(output_dir).mkdir(exist_ok=True)
+    file_path = Path(output_dir) / "governance_extracted.txt"
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        for i, chunk in enumerate(chunks, start=1):
+            f.write(f"\n{'=' * 80}\n")
+            f.write(f"CHUNK {i}\n")
+            f.write(f"{'=' * 80}\n")
+            for key, value in chunk.items():
+                if key != "text":
+                    f.write(f"{key}: {value}\n")
+            f.write("\nCONTENT:\n")
+            f.write(chunk["text"])
+            f.write("\n")
+
+    print(f"\nSaved extracted content to: {file_path.resolve()}")
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    url = input("Enter the URL of the governance document to extract: ").strip()
 
-    print("Extracting ALL text from website...")
+    print("\nStarting governance content ingestion...\n")
 
-    all_text = extract_all_text(URL)
+    extractor = GovernanceContentExtractor()
+    chunks = extractor.extract(url)
 
-    output_path = os.path.join(OUTPUT_DIR, OUTPUT_FILE)
-    save_to_txt(all_text, output_path)
+    print(f"Extracted {len(chunks)} content chunks\n")
 
-    print(f"✔ Extracted {len(all_text)} text lines")
-    print(f"✔ Saved to {output_path}")
+    if chunks:
+        print("Sample chunk:\n")
+        print(chunks[0])
+
+    save_to_text_file(chunks)
 
 
 if __name__ == "__main__":
